@@ -41,6 +41,7 @@ const FFT_SIZE = 2048;
 const CHUNK_INTERVAL = 1000;
 const AUDIO_MIME_TYPE = "audio/webm;codecs=opus";
 const ASR_ENDPOINT = "http://localhost:6544/transcribe";
+const MAX_RECORDING_LENGTH = 15000; // 15 seconds in milliseconds
 
 export class SpeechRecorder {
   private readonly options: RecorderOptions;
@@ -54,6 +55,7 @@ export class SpeechRecorder {
     isRecording: boolean;
     isWaitingForSpeech: boolean;
     silenceStartTime: number | null;
+    recordingStartTime: number | null;
     chunks: Blob[];
   };
 
@@ -71,6 +73,7 @@ export class SpeechRecorder {
       isRecording: false,
       isWaitingForSpeech: false,
       silenceStartTime: null,
+      recordingStartTime: null,
       chunks: [],
     };
   }
@@ -165,6 +168,7 @@ export class SpeechRecorder {
       debug("Starting recording...");
       mediaRecorder.start(CHUNK_INTERVAL);
       this.recordingState.isRecording = true;
+      this.recordingState.recordingStartTime = Date.now();
       this.startAudioLevelMonitoring();
       debug("Recording started");
     } catch (err) {
@@ -236,6 +240,7 @@ export class SpeechRecorder {
             this.options.onAudioLevel(db);
           }
         },
+        onCheckDuration: () => this.checkRecordingDuration(),
       }
     );
 
@@ -364,6 +369,20 @@ export class SpeechRecorder {
       this.startRecording();
     }
   }
+
+  private checkRecordingDuration = (): void => {
+    const { recordingStartTime, isRecording } = this.recordingState;
+
+    if (!recordingStartTime || !isRecording) return;
+
+    const duration = Date.now() - recordingStartTime;
+    if (duration >= MAX_RECORDING_LENGTH) {
+      debug(
+        `Max recording length (${MAX_RECORDING_LENGTH}ms) reached, stopping current segment`
+      );
+      this.stopRecording(true);
+    }
+  };
 }
 
 class AudioLevelMonitor {
@@ -383,6 +402,7 @@ class AudioLevelMonitor {
       onSilenceTimeout: () => void;
       onSpeechDetected: () => void;
       onAudioLevel: (db: number) => void;
+      onCheckDuration: () => void;
     }
   ) {
     this.dataArray = new Float32Array(analyser.frequencyBinCount);
@@ -410,6 +430,7 @@ class AudioLevelMonitor {
     const db = this.calculateDecibels();
 
     this.callbacks.onAudioLevel(db);
+    this.callbacks.onCheckDuration();
 
     if (Math.random() < 0.017) {
       debug("Current audio level:", Math.round(db), "dB");

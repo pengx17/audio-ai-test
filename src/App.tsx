@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { SpeechRecorder } from "./recorder";
 
 function App() {
   const [recorder, setRecorder] = useState<SpeechRecorder | null>(null);
   const [result, setResult] = useState<string>("");
   const [audioLevel, setAudioLevel] = useState<number>(0);
+  const preRef = useRef<HTMLPreElement>(null);
 
   const handleResult = (result: string) => {
     setResult((prev) => prev + result);
@@ -14,6 +15,17 @@ function App() {
     const normalizedLevel = Math.max(0, (level + 60) / 60);
     setAudioLevel(normalizedLevel);
   };
+
+  useEffect(() => {
+    if (preRef.current) {
+      const { scrollHeight, clientHeight, scrollTop } = preRef.current;
+      const isScrolledToBottom = scrollHeight - clientHeight <= scrollTop + 1;
+
+      if (isScrolledToBottom) {
+        preRef.current.scrollTop = scrollHeight;
+      }
+    }
+  }, [result]);
 
   return (
     <>
@@ -40,9 +52,23 @@ function App() {
       >
         停止录音
       </button>
-      {recorder && <progress value={audioLevel} max={1} />}
+      {recorder && (
+        <div>
+          🎙️
+          <progress value={audioLevel} max={1} />
+        </div>
+      )}
 
-      <pre>
+      <pre
+        ref={preRef}
+        style={{
+          maxHeight: "500px",
+          overflow: "auto",
+          border: "1px solid #ccc",
+          padding: "10px",
+          margin: "10px 0",
+        }}
+      >
         <code>{result}</code>
       </pre>
     </>

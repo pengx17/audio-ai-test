@@ -6,6 +6,7 @@ This project provides real-time audio captioning using OpenAI's Whisper model an
 
 - [x] Real-time audio recording
 - [x] Whisper transcription
+- [ ] Gemini transcription
 - [ ] AI summary
 
 ## Prerequisites

@@ -5,9 +5,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "tsx main.ts"
+    "start": "tsx --env-file=.env main.ts"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "express": "^4.21.2",
     "tsx": "^4.19.2"
   },

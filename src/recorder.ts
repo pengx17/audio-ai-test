@@ -5,6 +5,7 @@ const debug = (message: string, ...args: unknown[]) => {
 };
 
 interface RecorderOptions {
+  provider: "whisper" | "gemini";
   /** Silence threshold in dB (default: -50) */
   silenceThreshold: number;
   /** Duration of silence before stopping in ms (default: 800) */
@@ -29,6 +30,7 @@ const AUDIO_CONSTRAINTS = {
 } as const;
 
 const RECORDER_DEFAULTS = {
+  provider: "whisper",
   silenceThreshold: -50,
   silenceTimeout: 800,
   sampleRate: 16000,
@@ -91,6 +93,10 @@ export class SpeechRecorder {
       this.handleError(err as Error);
       return false;
     }
+  }
+
+  public setProvider(provider: "whisper" | "gemini"): void {
+    this.options.provider = provider;
   }
 
   private async initializeAudioStream(): Promise<void> {
@@ -267,7 +273,9 @@ export class SpeechRecorder {
       const wavBlob = new Blob([wavBuffer], { type: "audio/wav" });
       debug("WAV blob size:", wavBlob.size, "bytes");
 
-      const response = await fetch(ASR_ENDPOINT, {
+      const providerType = this.options.provider;
+      const url = ASR_ENDPOINT + "?provider=" + providerType;
+      const response = await fetch(url, {
         method: "POST",
         body: wavBlob,
         headers: {

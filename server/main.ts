@@ -2,6 +2,7 @@ import path from "node:path";
 import express from "express";
 import fs from "node:fs/promises";
 import { whisper } from "./whisper";
+import { gemini } from "./gemini";
 
 const app = express();
 
@@ -25,6 +26,41 @@ app.use((req, res, next) => {
   next();
 });
 
+abstract class ASRProvider {
+  abstract transcribe(
+    audioFile: string,
+    options: {
+      tmpDir: string;
+    }
+  ): Promise<string>;
+}
+
+class WhisperProvider extends ASRProvider {
+  async transcribe(
+    audioFile: string,
+    { tmpDir }: { tmpDir: string }
+  ): Promise<string> {
+    // requires "pip install mlx-whisper" (for Mac M chips)
+    const result = await whisper(audioFile, {
+      model: "mlx-community/whisper-turbo",
+      output_dir: tmpDir,
+      output_format: "txt",
+    });
+    const contents = await result.txt.getContent();
+    return contents;
+  }
+}
+
+class GeminiProvider extends ASRProvider {
+  async transcribe(audioFile: string) {
+    const audioBuffer = await fs.readFile(audioFile);
+    return gemini(audioBuffer);
+  }
+}
+
+const whisperProvider = new WhisperProvider();
+const geminiProvider = new GeminiProvider();
+
 app.post("/transcribe", async (req, res) => {
   const startTime = Date.now();
   let writeTime = 0;
@@ -46,6 +82,17 @@ app.post("/transcribe", async (req, res) => {
       });
     }
 
+    const providerType = req.query.provider as "whisper" | "gemini";
+
+    let provider: ASRProvider;
+    if (providerType === "whisper") {
+      provider = whisperProvider;
+    } else if (providerType === "gemini") {
+      provider = geminiProvider;
+    } else {
+      return res.status(400).json({ error: "Invalid provider" });
+    }
+
     // Get file extension from content type
     const extension = contentType.split("/")[1];
 
@@ -63,26 +110,17 @@ app.post("/transcribe", async (req, res) => {
     try {
       console.log("Starting transcription...");
       const transcribeStart = Date.now();
-      // requires "pip install mlx-whisper" (for Mac M chips)
-      const result = await whisper(tempFile, {
-        model: "mlx-community/whisper-turbo",
-        output_dir: tmpDir,
-        output_format: "txt",
+      const contents = await provider.transcribe(tempFile, {
+        tmpDir,
       });
-
-      const contents = await result.txt.getContent();
       transcribeTime = Date.now() - transcribeStart;
       console.log(`Transcription took ${transcribeTime}ms`);
-
-      const totalTime = Date.now() - startTime;
-      console.log(`Total processing time: ${totalTime}ms`);
 
       res.json({
         transcription: contents,
         metrics: {
           writeTime,
           transcribeTime,
-          totalTime,
         },
       });
     } finally {

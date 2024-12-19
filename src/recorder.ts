@@ -1,27 +1,24 @@
-import { audioBufferToWav } from "./audio-buffer-to-wav";
-
 const debug = (message: string, ...args: unknown[]) => {
   console.debug(`[SpeechRecorder] ${message}`, ...args);
 };
 
+interface RecorderEvents {
+  silenceDetected: Blob;
+  audioLevel: number;
+  error: Error;
+}
+
+type RecorderEventCallback<T> = (data: T) => void | Promise<void>;
+
 interface RecorderOptions {
-  provider: "whisper" | "gemini";
   /** Silence threshold in dB (default: -50) */
   silenceThreshold: number;
   /** Duration of silence before stopping in ms (default: 800) */
   silenceTimeout: number;
   /** Sample rate in Hz (default: 16000) */
   sampleRate?: number;
-  /** Callback for ASR results */
-  onResult?: (text: string) => void;
-  /** Callback for error handling */
-  onError?: (error: Error) => void;
   /** Callback for audio level updates */
   onAudioLevel?: (db: number) => void;
-}
-
-interface ASRResult {
-  transcription: string;
 }
 
 const AUDIO_CONSTRAINTS = {
@@ -30,19 +27,15 @@ const AUDIO_CONSTRAINTS = {
 } as const;
 
 const RECORDER_DEFAULTS = {
-  provider: "whisper",
   silenceThreshold: -50,
   silenceTimeout: 800,
   sampleRate: 16000,
-  onResult: (text: string) => console.log("Recognition result:", text),
-  onError: (error: Error) => console.error("Error:", error),
   onAudioLevel: () => {},
 } as const;
 
 const FFT_SIZE = 2048;
 const CHUNK_INTERVAL = 1000;
 const AUDIO_MIME_TYPE = "audio/webm;codecs=opus";
-const ASR_ENDPOINT = "http://localhost:6544/transcribe";
 const MAX_RECORDING_LENGTH = 15000; // 15 seconds in milliseconds
 
 export class SpeechRecorder {
@@ -59,9 +52,17 @@ export class SpeechRecorder {
     silenceStartTime: number | null;
     recordingStartTime: number | null;
     chunks: Blob[];
+    lastProcessedChunkIndex: number;
   };
 
   private audioLevelMonitor: AudioLevelMonitor | null = null;
+  private readonly eventListeners: {
+    [K in keyof RecorderEvents]: Set<RecorderEventCallback<RecorderEvents[K]>>;
+  } = {
+    silenceDetected: new Set(),
+    audioLevel: new Set(),
+    error: new Set(),
+  };
 
   constructor(options: Partial<RecorderOptions> = {}) {
     this.options = { ...RECORDER_DEFAULTS, ...options };
@@ -77,6 +78,7 @@ export class SpeechRecorder {
       silenceStartTime: null,
       recordingStartTime: null,
       chunks: [],
+      lastProcessedChunkIndex: -1,
     };
   }
 
@@ -95,8 +97,35 @@ export class SpeechRecorder {
     }
   }
 
-  public setProvider(provider: "whisper" | "gemini"): void {
-    this.options.provider = provider;
+  public addEventListener<K extends keyof RecorderEvents>(
+    event: K,
+    callback: RecorderEventCallback<RecorderEvents[K]>
+  ): void {
+    if (!this.eventListeners[event]) {
+      // @ts-expect-error maybe later
+      this.eventListeners[event] = new Set();
+    }
+    this.eventListeners[event]?.add(callback);
+  }
+
+  public removeEventListener<K extends keyof RecorderEvents>(
+    event: K,
+    callback: RecorderEventCallback<RecorderEvents[K]>
+  ): void {
+    this.eventListeners[event]?.delete(callback);
+  }
+
+  private emit<K extends keyof RecorderEvents>(
+    event: K,
+    data: RecorderEvents[K]
+  ): void {
+    this.eventListeners[event]?.forEach((callback) => {
+      try {
+        callback(data);
+      } catch (err) {
+        console.error(`Error in ${event} event handler:`, err);
+      }
+    });
   }
 
   private async initializeAudioStream(): Promise<void> {
@@ -153,12 +182,19 @@ export class SpeechRecorder {
   private handleRecordingStop = async (): Promise<void> => {
     debug("MediaRecorder stopped, processing chunks...");
     try {
-      const audioBlob = new Blob(this.recordingState.chunks, {
+      const newChunks = this.recordingState.chunks.slice(
+        this.recordingState.lastProcessedChunkIndex + 1
+      );
+
+      const audioBlob = new Blob(newChunks, {
         type: AUDIO_MIME_TYPE,
       });
       debug("Created audio blob:", audioBlob.size, "bytes");
-      this.recordingState.chunks = [];
-      await this.processAudioSegment(audioBlob);
+
+      this.recordingState.lastProcessedChunkIndex =
+        this.recordingState.chunks.length - 1;
+
+      this.emit("silenceDetected", audioBlob);
     } catch (err) {
       this.handleError(err as Error);
     }
@@ -172,6 +208,10 @@ export class SpeechRecorder {
 
     try {
       debug("Starting recording...");
+      if (!this.recordingState.isWaitingForSpeech) {
+        this.recordingState.chunks = [];
+        this.recordingState.lastProcessedChunkIndex = -1;
+      }
       mediaRecorder.start(CHUNK_INTERVAL);
       this.recordingState.isRecording = true;
       this.recordingState.recordingStartTime = Date.now();
@@ -242,6 +282,7 @@ export class SpeechRecorder {
         onSilenceTimeout: () => this.handleSilenceTimeout(),
         onSpeechDetected: () => this.handleSpeechDetected(),
         onAudioLevel: (db: number) => {
+          this.emit("audioLevel", db);
           if (this.options.onAudioLevel) {
             this.options.onAudioLevel(db);
           }
@@ -254,55 +295,8 @@ export class SpeechRecorder {
     this.audioLevelMonitor = monitor;
   }
 
-  private async convertToWav(audioBlob: Blob): Promise<ArrayBuffer> {
-    if (!this.audioState.audioContext) {
-      throw new Error("AudioContext not initialized");
-    }
-
-    const arrayBuffer = await audioBlob.arrayBuffer();
-    const audioBuffer = await this.audioState.audioContext.decodeAudioData(
-      arrayBuffer
-    );
-
-    return audioBufferToWav(audioBuffer);
-  }
-
-  private async sendToASR(wavBuffer: ArrayBuffer): Promise<void> {
-    try {
-      debug("Sending audio to ASR service...");
-      const wavBlob = new Blob([wavBuffer], { type: "audio/wav" });
-      debug("WAV blob size:", wavBlob.size, "bytes");
-
-      const providerType = this.options.provider;
-      const url = ASR_ENDPOINT + "?provider=" + providerType;
-      const response = await fetch(url, {
-        method: "POST",
-        body: wavBlob,
-        headers: {
-          "Content-Type": "audio/wav",
-        },
-      });
-
-      if (!response.ok) {
-        debug("ASR request failed:", response.status, response.statusText);
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const result: ASRResult = await response.json();
-      debug("Received ASR result:", result);
-      if (this.options.onResult) {
-        this.options.onResult(result.transcription);
-      }
-    } catch (err) {
-      debug("ASR error:", err);
-      this.handleError(err as Error);
-    }
-  }
-
   private handleError(error: Error): void {
-    if (this.options.onError) {
-      this.options.onError(error);
-    }
+    this.emit("error", error);
   }
 
   public async dispose(): Promise<void> {
@@ -347,12 +341,6 @@ export class SpeechRecorder {
     debug("Recorder disposed");
   }
 
-  private async processAudioSegment(audioBlob: Blob): Promise<void> {
-    const wavBuffer = await this.convertToWav(audioBlob);
-    debug("Converted segment to WAV format:", wavBuffer.byteLength, "bytes");
-    await this.sendToASR(wavBuffer);
-  }
-
   private handleSilenceStart(): void {
     debug("Silence period started");
     this.recordingState.silenceStartTime = Date.now();
@@ -391,6 +379,16 @@ export class SpeechRecorder {
       this.stopRecording(true);
     }
   };
+
+  public getFullRecording(): Blob | null {
+    if (this.recordingState.chunks.length === 0) {
+      return null;
+    }
+
+    return new Blob(this.recordingState.chunks, {
+      type: AUDIO_MIME_TYPE,
+    });
+  }
 }
 
 class AudioLevelMonitor {

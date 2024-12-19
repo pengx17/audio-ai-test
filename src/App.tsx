@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect } from "react";
-import { SpeechRecorder } from "./recorder";
+import { ASRHelper, createASRHelper } from "./asr-helper";
 
 function App() {
-  const [recorder, setRecorder] = useState<SpeechRecorder | null>(null);
+  const [asrHelper, setAsrHelper] = useState<ASRHelper | null>(null);
   const [result, setResult] = useState<string>("");
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [provider, setProvider] = useState<"whisper" | "gemini">("whisper");
   const preRef = useRef<HTMLPreElement>(null);
+  const [audioUrls, setAudioUrls] = useState<string[]>([]);
 
   const handleResult = (result: string) => {
     setResult((prev) => prev + result);
@@ -30,8 +31,8 @@ function App() {
 
   const onProviderChange = (provider: "whisper" | "gemini") => {
     setProvider(provider);
-    if (recorder) {
-      recorder.setProvider(provider);
+    if (asrHelper) {
+      asrHelper.setProvider(provider);
     }
   };
 
@@ -69,35 +70,43 @@ function App() {
         <button
           onClick={async () => {
             console.log("开始录音");
-            const recorder = new SpeechRecorder({
+            const asrHelper = createASRHelper({
+              provider,
               onResult: handleResult,
               onAudioLevel: handleAudioLevel,
-              provider,
             });
-            await recorder.init();
-            recorder.startRecording();
-            setRecorder(recorder);
+            await asrHelper.start();
+            setAsrHelper(asrHelper);
           }}
-          disabled={recorder !== null}
+          disabled={asrHelper !== null}
         >
-          开始录音 {recorder ? "🟢" : "🔴"}
+          开始录音 {asrHelper ? "🟢" : "🔴"}
         </button>
         <button
-          onClick={() => {
-            recorder?.dispose();
-            setRecorder(null);
+          disabled={asrHelper === null}
+          onClick={async () => {
+            const blob = await asrHelper?.stop();
+            if (blob) {
+              const audioUrl = URL.createObjectURL(blob);
+              setAudioUrls((prev) => [...prev, audioUrl]);
+            }
+            setAsrHelper(null);
           }}
         >
           停止录音
         </button>
       </div>
 
-      {recorder && (
+      {asrHelper && (
         <div>
           🎙️
           <progress value={audioLevel} max={1} />
         </div>
       )}
+
+      {audioUrls.map((url) => (
+        <audio src={url} controls key={url} />
+      ))}
 
       <pre
         ref={preRef}
